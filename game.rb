@@ -1,106 +1,156 @@
 require 'rubygems'
 require 'bundler/setup'
-require 'socket'
 
 require 'eventmachine'
 
-class GloriousDeath < StandardError
+class GameServer
+  attr_accessor :connections
+  attr_accessor :players
+
+  def initialize
+    @connections = []
+    @players = []
+  end
+
+  def render_all(str)
+    connections.each { |c| c.render str }
+  end
+
+  def deal_damage_to_player(attacker, player_name, points)
+    target = players.find { |p| p.name == player_name.strip }
+    if target
+      died = target.take_damage(points)
+
+      if !died
+        render_all "#{attacker.name} deals #{points} damagae to #{target.name}"
+        render_all "#{target.name} has #{target.health} health left."
+      else
+        attacker.score!
+      end
+    else
+      render_all "#{attacker.name} missed and made a fool of himself"
+    end
+  end
+
+  def start
+    @signature = EM.start_server('0.0.0.0', 8081, Connection) do |conn|
+      conn.game = self
+      @connections << conn
+    end
+
+    EM.add_periodic_timer(2) { puts "Connections: #{@connections.size}" }
+  end
+
+  def stop
+    EM.stop_server(@signature)
+  end
 end
 
 class Player
-  attr_reader :health
+  attr_reader :name
+  attr_accessor :connection
+  attr_accessor :game
+  attr_accessor :health
+  attr_accessor :score
 
-  attr_reader :attack_power
+  def render(str)
+    @connection.render(str)
+  end
 
-  def initialize
-    @health = rand(100) + 20
+  def render_all(str)
+    @connection.render_all(str)
+  end
+
+  def initialize(connection, game, name)
+    @connection = connection
+    @name = name
+    @game = game
+    @score = 0
+    @health = 50
+
+    @game.players << self
+
+    joined
+  end
+
+  def attack(other_player)
+    @game.deal_damage_to_player self, other_player, 10
+  end
+
+  def score!
+    @score += 1
+    render_all "++ #{name} scored 1 point ++"
+  end
+
+  def take_damage(points)
+    @health -= points
+
+    if dead?
+      render_all "#{name} died."
+      disconnect!
+    end
+
+    return dead?
   end
 
   def dead?
-    health <= 0
+    @health <= 0
   end
 
-  def attack_power
-    rand(10) + 3
+  def exit
+    render_all "#{name} gives up. Loser!"
+    disconnect!
   end
 
-  def defense_power
-    rand(3) + 1
+  def disconnect!
+    connection.close_connection(true)
   end
 
-  def damage(power)
-    @health -= [power - defense_power, 0].max
-    raise GloriousDeath if dead?
-  end
-
-  def heal
-    @health += 10
+  def joined
+    render_all "#{name} has joined the arena!"
   end
 end
 
-class AiPlayer < Player
+class Connection < EM::Connection
+  attr_accessor :game
 
-end
-
-class Game
-  attr_reader :player1, :player2
-  attr_reader :attacker, :defender
-
-  def initialize(player1, player2)
-    @player1, @player2 = player1, player2
-    @attacker, @defender = @player1, @player2
+  def unbind
+    game.connections.delete(self)
   end
 
-  def process_input(peer, data)
-    port, ip = Socket.unpack_sockaddr_in(peer)
-    puts "peer: #{ip}:#{port}"
-    case data
-    when /attack/i then
-      @defender.damage @attacker.attack_power
-    when /heal/i then
-      @attacker.heal
-    else
-    end
-
-    render_score
-  rescue GloriousDeath
-    return :death
+  def render_all(str)
+    game.render_all(str)
   end
 
-  def render_score
-    "Score #{@player1.health} vs. #{@player2.health}"
-  end
-
-  def any_player_has_died?
-    player1.dead? || player2.dead?
-  end
-end
-
-module GameConnection
-  def send_string(str)
-    send_data("#{str}\r\n")
-  end
-
-  def post_init
-    send_string("Welcome to V I K I N G")
-    @player = Player.new
-    @ai = AiPlayer.new
-    @game = Game.new(@player, @ai)
+  def render(str)
+    send_data("> #{str}\r\n")
   end
 
   def receive_data(data)
-    result = @game.process_input(get_peername, data)
+    cmd, opt= data.strip.split(" ")
 
-    if result == :death
-      send_string "The defender died. YOU WIN AN EPIC VICTORY!"
-      close_connection
+    case (cmd)
+    when /join/i then
+      if @player.nil?
+        @player = Player.new(self, game, opt.strip)
+      else
+        render "You've already joined."
+      end
+    when /look/i then
+      render @game.players.map(&:name).join(", ")
+    when /attack/i then
+      @player.attack(opt)
+    when /exit/i then
+      @player.exit
+    else
+      render "Don't know what you mean. Do you speak English?"
     end
-
-    send_string result
   end
+
 end
 
-EM.run {
-  EM.start_server '127.0.0.1', 8081, GameConnection
-  puts ">> Started on 127.0.0.1:8081"
+EM::run {
+  s = GameServer.new
+  s.start
+  puts "Started server"
 }
