@@ -19,11 +19,16 @@ class GameServer
   def deal_damage_to_player(attacker, player_name, points)
     target = players.find { |p| p.name == player_name.strip }
     if target
-      died = target.take_damage(points)
+      died, blocked = target.take_damage(points)
 
       if !died
-        render_all "#{attacker.name} deals #{points} damagae to #{target.name}"
-        render_all "#{target.name} has #{target.health} health left."
+        if blocked == 0
+          render_all "#{attacker.name} misses #{target.name} completely. Epic fail achieved."
+        else
+          render_all "#{target.name} blocks #{blocked} damage from #{attacker.name}"
+          render_all "#{attacker.name} deals #{points} damage to #{target.name}"
+          render_all "#{target.name} has #{target.health} health left."
+        end
       else
         attacker.score!
       end
@@ -66,7 +71,7 @@ class Player
     @name = name
     @game = game
     @score = 0
-    @health = 50
+    @health = 100
 
     @game.players << self
 
@@ -74,23 +79,26 @@ class Player
   end
 
   def attack(other_player)
-    @game.deal_damage_to_player self, other_player, 10
+    @game.deal_damage_to_player self, other_player, rand(10) + 1
   end
 
   def score!
     @score += 1
-    render_all "++ #{name} scored 1 point ++"
+    render_all "++ #{name} has #{score} points ++"
   end
 
   def take_damage(points)
-    @health -= points
+    defense = rand(points) + 1
+    damage = points - defense
+
+    @health -= damage
 
     if dead?
       render_all "#{name} died."
       disconnect!
     end
 
-    return dead?
+    return [dead?, damage]
   end
 
   def dead?
@@ -128,6 +136,8 @@ class Connection < EM::Connection
 
   def receive_data(data)
     cmd, opt= data.strip.split(" ")
+
+    render 'Provide a command and a name' unless opt
 
     case (cmd)
     when /join/i then
